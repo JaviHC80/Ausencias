@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <meta name="theme-color" content="#1A237E"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <meta name="apple-mobile-web-app-title" content="Ausencias"/>
+  <title>Control de Ausencias</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet"/>
+  <!-- OneSignal SDK -->
+  <script src="https://cdn.onesignal.com/sdks/web/v16/OneSignalSDK.page.js" defer></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+    html,body{height:100%;background:#F0F4F8;font-family:'Nunito',sans-serif}
+    #root{height:100%}
+    input[type="date"]{-webkit-appearance:none;appearance:none}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Firebase Firestore (solo base de datos, sin messaging) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+
+<!-- React + Babel -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script>
+// ── Firebase (Firestore para datos compartidos) ──────────────────────────────
+firebase.initializeApp({
+  apiKey: "AIzaSyAfZ4pki7SGDfAUstcRYKwp8FL2tFqa-3s",
+  authDomain: "ausencias-e5b4c.firebaseapp.com",
+  projectId: "ausencias-e5b4c",
+  storageBucket: "ausencias-e5b4c.firebasestorage.app",
+  messagingSenderId: "416450951783",
+  appId: "1:416450951783:web:783d5b28f9b47b91d9b2c2"
+});
+const db = firebase.firestore();
+
+// ── OneSignal (notificaciones push) ─────────────────────────────────────────
+const OS_APP_ID  = "3f434b86-889d-4a65-a1be-25d5df4ad281";
+
+window.OneSignalDeferred = window.OneSignalDeferred || [];
+OneSignalDeferred.push(async function(OneSignal) {
+  await OneSignal.init({
+    appId: OS_APP_ID,
+    serviceWorkerPath: "OneSignalSDKWorker.js",
+    serviceWorkerParam: { scope: "/" },
+    notifyButton: { enable: false },
+    promptOptions: {
+      slidedown: {
+        prompts: [{
+          type: "push",
+          autoPrompt: false,
+        }]
+      }
+    }
+  });
+  window._oneSignalReady = true;
+});
+
+async function setupOneSignal(workerName) {
+  try {
+    await new Promise(res => {
+      if(window._oneSignalReady) return res();
+      const check = setInterval(()=>{ if(window._oneSignalReady){ clearInterval(check); res(); } }, 200);
+      setTimeout(()=>{ clearInterval(check); res(); }, 5000);
+    });
+    await OneSignal.login(workerName);
+    const permission = await OneSignal.Notifications.requestPermission();
+    console.log("Push permission:", permission);
+  } catch(e) { console.warn("OneSignal setup:", e); }
+}
+
+async function sendPushToOthers(msg, excludeUser) {
+  const recipients = ["Ana","Eva","Fabiola","Aroa","Javi"].filter(w => w !== excludeUser);
+  try {
+    // Llamada a la Netlify Function (evita CORS y oculta la API key)
+    await fetch("/.netlify/functions/send-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msg, recipients }),
+    });
+  } catch(e) { console.warn("Push send error:", e); }
+}
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const WORKERS = ["Ana","Eva","Fabiola","Aroa","Javi"];
+const MOTIVOS = ["Vacaciones","Asuntos propios","Médico","Baja"];
+const TIPOS   = ["Completa","Parcial"];
+const MICON   = { Vacaciones:"🏖️", "Asuntos propios":"📋", Médico:"🩺", Baja:"🤒" };
+const MCOL    = {
+  Vacaciones:        { bg:"#FFF3E0", ac:"#F57C00", tx:"#BF360C" },
+  "Asuntos propios": { bg:"#E8F5E9", ac:"#388E3C", tx:"#1B5E20" },
+  Médico:            { bg:"#E3F2FD", ac:"#1976D2", tx:"#0D47A1" },
+  Baja:              { bg:"#FCE4EC", ac:"#C62828", tx:"#7B1521" },
+};
+const WCOL = ["#3F51B5","#D81B60","#00897B","#F4511E","#6A1B9A"];
+const DOWS = ["L","M","X","J","V"];
+
+const TZ = "Atlantic/Canary";
+function today()     { return new Date().toLocaleDateString("sv-SE",{timeZone:TZ}); }
+function pad(n)      { return String(n).padStart(2,"0"); }
+function dateStr(y,m,d){ return `${y}-${pad(m+1)}-${pad(d)}`; }
+function fmtDate(d)  { return new Date(d+"T12:00:00Z").toLocaleDateString("es-ES",{weekday:"long",day:"numeric",month:"long",timeZone:TZ}); }
+function fmtShort(d) { return new Date(d+"T12:00:00Z").toLocaleDateString("es-ES",{day:"numeric",month:"short",timeZone:TZ}); }
+function fmtFull(ts) { return new Date(ts).toLocaleDateString("es-ES",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit",timeZone:TZ}); }
+function wcolor(w)   { return WCOL[WORKERS.indexOf(w)]; }
+function nowCanary() { const s=new Date().toLocaleDateString("sv-SE",{timeZone:TZ}); return {year:Number(s.slice(0,4)),month:Number(s.slice(5,7))-1}; }
+function expandRange(from,to){
+  const days=[]; let cur=new Date(from+"T12:00:00Z"); const end=new Date(to+"T12:00:00Z");
+  while(cur<=end){ days.push(cur.toLocaleDateString("sv-SE",{timeZone:TZ})); cur.setUTCDate(cur.getUTCDate()+1); }
+  return days;
+}
+
+// ── Firestore helpers ─────────────────────────────────────────────────────────
+async function fsSaveAusencia(entry) {
+  await db.collection("ausencias").doc(String(entry.id)).set(entry);
+}
+async function fsDeleteAusencia(id) {
+  await db.collection("ausencias").doc(String(id)).delete();
+}
+async function fsAddEvento(ev) {
+  await db.collection("eventos").doc(String(ev.id)).set(ev);
+  const snap = await db.collection("eventos").orderBy("ts","desc").get();
+  if(snap.docs.length > 50){
+    const batch = db.batch();
+    snap.docs.slice(50).forEach(d => batch.delete(d.ref));
+    await batch.commit();
+  }
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading]         = useState(true);
+  const [view, setView]               = useState("registro");
+  const [dateFrom, setDateFrom]       = useState(today());
+  const [dateTo, setDateTo]           = useState(today());
+  const [tipo, setTipo]               = useState(TIPOS[0]);
+  const [motivo, setMotivo]           = useState(MOTIVOS[0]);
+  const [ausencias, setAusencias]     = useState([]);
+  const [eventos, setEventos]         = useState([]);
+  const [lastSeen, setLastSeen]       = useState(0);
+  const [unread, setUnread]           = useState(0);
+  const [saved, setSaved]             = useState(false);
+  const [calYear, setCalYear]         = useState(()=>nowCanary().year);
+  const [calMonth, setCalMonth]       = useState(()=>nowCanary().month);
+  const [selectedDay, setSelectedDay] = useState(null);
+  const [filter, setFilter]           = useState("Todos");
+  const [confirmDel, setConfirmDel]   = useState(null);
+  const [toast, setToast]             = useState(null);
+  const [notifOpen, setNotifOpen]     = useState(false);
+  const unsubRef    = useRef([]);
+  const lastSeenRef = useRef(0);
+
+  useEffect(()=>{
+    const saved = localStorage.getItem("current-user");
+    if(saved){ setCurrentUser(saved); setupListeners(saved); }
+    setLoading(false);
+  },[]);
+
+  function setupListeners(user) {
+    unsubRef.current.forEach(u=>u());
+    unsubRef.current = [];
+    const ls = Number(localStorage.getItem(`last-seen-${user}`)||0);
+    setLastSeen(ls); lastSeenRef.current = ls;
+
+    const u1 = db.collection("ausencias").onSnapshot(snap=>{
+      setAusencias(snap.docs.map(d=>d.data()));
+    });
+    const u2 = db.collection("eventos").orderBy("ts","desc").limit(50).onSnapshot(snap=>{
+      const evs = snap.docs.map(d=>d.data());
+      setEventos(evs);
+      setUnread(evs.filter(e=>e.ts>lastSeenRef.current && e.who!==user).length);
+    });
+    unsubRef.current = [u1,u2];
+  }
+
+  useEffect(()=>{ lastSeenRef.current=lastSeen; },[lastSeen]);
+
+  async function login(name) {
+    setCurrentUser(name);
+    localStorage.setItem("current-user",name);
+    setupListeners(name);
+    await setupOneSignal(name); // Registrar dispositivo en OneSignal
+  }
+
+  function logout() {
+    unsubRef.current.forEach(u=>u());
+    unsubRef.current = [];
+    setCurrentUser(null); setView("registro"); setNotifOpen(false);
+    localStorage.removeItem("current-user");
+    try { OneSignal.logout(); } catch(e){}
+  }
+
+  async function markRead() {
+    const now=Date.now(); setLastSeen(now); setUnread(0); lastSeenRef.current=now;
+    localStorage.setItem(`last-seen-${currentUser}`,String(now));
+  }
+
+  function showToast(msg,col){ setToast({msg,col:col||"#1B5E20"}); setTimeout(()=>setToast(null),2600); }
+  function handleDateFrom(v){ setDateFrom(v); if(v>dateTo) setDateTo(v); }
+
+  async function submit() {
+    if(dateFrom>dateTo){ showToast("⚠️ La fecha de fin no puede ser anterior al inicio","#E65100"); return; }
+    const days=expandRange(dateFrom,dateTo);
+    const conflict=days.find(d=>ausencias.find(a=>a.worker===currentUser&&a.days.includes(d)));
+    if(conflict){ showToast(`⚠️ Ya tienes ausencia el ${fmtShort(conflict)}`,"#E65100"); return; }
+    const isRange=dateFrom!==dateTo;
+    const label=isRange?`${fmtShort(dateFrom)} – ${fmtShort(dateTo)}`:fmtShort(dateFrom);
+    const entry={id:Date.now(),worker:currentUser,dateFrom,dateTo,days,tipo,motivo,label,isRange};
+    try {
+      await fsSaveAusencia(entry);
+      const dateLabel=isRange?`del ${fmtShort(dateFrom)} al ${fmtShort(dateTo)} (${days.length} días)`:`el ${fmtShort(dateFrom)}`;
+      const msg=`${currentUser} ha solicitado ${tipo.toLowerCase()} por ${motivo} ${dateLabel}`;
+      const ev={id:Date.now()+1,ts:Date.now(),who:currentUser,tipo:"add",msg,motivo,isRange};
+      await fsAddEvento(ev);
+      await sendPushToOthers(msg, currentUser); // 🔔 Push a los demás
+      setSaved(true);
+      showToast(days.length===1?"✅ Ausencia registrada":`✅ ${days.length} días registrados`);
+      setTimeout(()=>setSaved(false),1800);
+    } catch(e){ showToast("❌ Error al guardar. Comprueba tu conexión","#C62828"); }
+  }
+
+  async function doDelete(id) {
+    const aus=ausencias.find(a=>a.id===id);
+    if(!aus||aus.worker!==currentUser){ showToast("⚠️ Solo puedes eliminar tus propias ausencias","#E65100"); setConfirmDel(null); return; }
+    try {
+      await fsDeleteAusencia(id);
+      const msg=`${currentUser} ha eliminado su ausencia del ${fmtShort(aus.dateFrom)}${aus.isRange?` al ${fmtShort(aus.dateTo)}`:""}`;
+      const ev={id:Date.now(),ts:Date.now(),who:currentUser,tipo:"del",msg,motivo:aus.motivo,isRange:aus.isRange};
+      await fsAddEvento(ev);
+      await sendPushToOthers(msg, currentUser); // 🔔 Push a los demás
+      setConfirmDel(null); showToast("🗑️ Ausencia eliminada","#E65100");
+    } catch(e){ showToast("❌ Error al eliminar","#C62828"); }
+  }
+
+  function prevMonth(){ setCalMonth(m=>{ if(m===0){setCalYear(y=>y-1);return 11;} return m-1; }); setSelectedDay(null); }
+  function nextMonth(){ setCalMonth(m=>{ if(m===11){setCalYear(y=>y+1);return 0;} return m+1; }); setSelectedDay(null); }
+
+  if(loading) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",color:"#90A4AE",fontWeight:700,fontSize:14,fontFamily:"'Nunito',sans-serif"}}>Cargando…</div>;
+
+  // ── LOGIN ──────────────────────────────────────────────────────────────────
+  if(!currentUser) return (
+    <div style={S.root}>
+      <div style={S.loginWrap}>
+        <div style={S.loginCard}>
+          <div style={{fontSize:52,marginBottom:12}}>📅</div>
+          <h1 style={S.loginTitle}>Control de Ausencias</h1>
+          <p style={S.loginSub}>¿Quién eres?</p>
+          <div style={S.loginGrid}>
+            {WORKERS.map((w,i)=>(
+              <button key={w} style={{...S.loginBtn,borderColor:WCOL[i]}} onClick={()=>login(w)}>
+                <div style={{...S.loginAvatar,background:WCOL[i]}}>{w[0]}</div>
+                <span style={{...S.loginName,color:WCOL[i]}}>{w}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const ci = WORKERS.indexOf(currentUser);
+
+  // ── NOTIFICACIONES ────────────────────────────────────────────────────────
+  const NotifPanel = () => {
+    const mine=eventos.filter(e=>e.who!==currentUser);
+    const newEvs=mine.filter(e=>e.ts>lastSeen);
+    const oldEvs=mine.filter(e=>e.ts<=lastSeen);
+    const EvRow=({e,isNew})=>{
+      const col=wcolor(e.who);
+      return(
+        <div style={{...S.evRow,background:isNew?"#FFFDE7":"transparent",borderBottom:"0.5px solid #ECEFF1"}}>
+          <div style={{position:"relative",flexShrink:0}}>
+            <div style={{...S.dav,background:col,width:32,height:32,fontSize:12}}>{e.who[0]}</div>
+            {isNew&&<div style={S.newDot}/>}
+          </div>
+          <div style={{flex:1,minWidth:0}}>
+            <p style={S.evMsg}>{e.msg}</p>
+            <p style={S.evTime}>{fmtFull(e.ts)}</p>
+          </div>
+          <span style={{fontSize:16,flexShrink:0}}>{e.tipo==="add"?"📥":"🗑️"}</span>
+        </div>
+      );
+    };
+    return(
+      <div style={S.notifBackdrop} onClick={()=>setNotifOpen(false)}>
+        <div style={S.notifPanel} onClick={e=>e.stopPropagation()}>
+          <div style={S.notifHdr}>
+            <span style={S.notifTitle}>🔔 Novedades del equipo</span>
+            <button style={S.notifClose} onClick={()=>setNotifOpen(false)}>✕</button>
+          </div>
+          {mine.length===0
+            ?<div style={S.notifEmpty}><span style={{fontSize:36}}>💤</span><p>Sin actividad reciente</p></div>
+            :<div style={{overflowY:"auto",maxHeight:420}}>
+              {newEvs.length>0&&<><div style={S.evSection}>Nuevas desde tu última visita</div>{newEvs.map(e=><EvRow key={e.id} e={e} isNew/>)}</>}
+              {oldEvs.length>0&&<><div style={{...S.evSection,color:"#90A4AE"}}>Anteriores</div>{oldEvs.map(e=><EvRow key={e.id} e={e} isNew={false}/>)}</>}
+            </div>
+          }
+          {unread>0&&<div style={S.notifFooter}><button style={{...S.sbtn,background:WCOL[ci],padding:"11px 0",fontSize:13}} onClick={()=>{markRead();setNotifOpen(false);}}>✓ Marcar todo como leído</button></div>}
+        </div>
+      </div>
+    );
+  };
+
+  // ── REGISTRO ─────────────────────────────────────────────────────────────
+  const Registro=()=>{
+    const days=dateFrom<=dateTo?expandRange(dateFrom,dateTo).length:0;
+    return(
+      <div style={S.card}>
+        <div style={S.ctitle}>Nueva ausencia</div>
+        <div style={{...S.myUserBadge,background:WCOL[ci]+"18",borderColor:WCOL[ci]+"60"}}>
+          <div style={{...S.wav,background:WCOL[ci],width:28,height:28,fontSize:12}}>{currentUser[0]}</div>
+          <span style={{fontWeight:800,color:WCOL[ci],fontSize:14}}>Registrando como <strong>{currentUser}</strong></span>
+        </div>
+        <label style={S.lbl}>Fechas</label>
+        <div style={S.dateRow}>
+          <div style={S.dateBlock}><span style={S.dateSublbl}>Desde</span><input type="date" value={dateFrom} onChange={e=>handleDateFrom(e.target.value)} style={S.dtin}/></div>
+          <div style={S.dateSep}>→</div>
+          <div style={S.dateBlock}><span style={S.dateSublbl}>Hasta</span><input type="date" value={dateTo} min={dateFrom} onChange={e=>setDateTo(e.target.value)} style={S.dtin}/></div>
+        </div>
+        {days>1&&<div style={S.rangeBadge}>📆 {days} días · {fmtShort(dateFrom)} – {fmtShort(dateTo)}</div>}
+        <label style={S.lbl}>Tipo de ausencia</label>
+        <div style={S.trow}>{TIPOS.map(t=><button key={t} style={{...S.tbtn,...(tipo===t?S.tbtnOn:{})}} onClick={()=>setTipo(t)}>{t==="Completa"?"● Completa":"◑ Parcial"}</button>)}</div>
+        <label style={S.lbl}>Motivo</label>
+        <div style={S.mgrid}>{MOTIVOS.map(m=>{const c=MCOL[m];const on=motivo===m;return(<button key={m} onClick={()=>setMotivo(m)} style={{...S.mbtn,background:on?c.bg:"#F5F5F5",color:on?c.ac:"#777",border:`2px solid ${on?c.ac:"transparent"}`}}><span style={{fontSize:20}}>{MICON[m]}</span><span style={{fontSize:10,fontWeight:700,marginTop:2,textAlign:"center"}}>{m}</span></button>);})}</div>
+        <button style={{...S.sbtn,background:saved?"#2E7D32":WCOL[ci]}} onClick={submit}>{saved?"✓ Registrado":days>1?`Guardar ${days} días`:"Guardar ausencia"}</button>
+      </div>
+    );
+  };
+
+  // ── CALENDARIO ───────────────────────────────────────────────────────────
+  const Calendario=()=>{
+    const firstDow=(new Date(calYear,calMonth,1).getDay()+6)%7;
+    const daysInMonth=new Date(calYear,calMonth+1,0).getDate();
+    const todayStr=today();
+    const monthName=new Date(calYear,calMonth,1).toLocaleDateString("es-ES",{month:"long",year:"numeric"});
+    const getAus=ds=>ausencias.filter(a=>a.days.includes(ds));
+    const selAus=selectedDay?getAus(selectedDay):[];
+    const selAbsent=new Set(selAus.map(a=>a.worker));
+    const selNWork=WORKERS.length-selAbsent.size;
+    const r0=selNWork/WORKERS.length;
+    const pillCol=r0===1?"#2E7D32":r0>=.6?"#E65100":"#C62828";
+    const pillBg=r0===1?"#E8F5E9":r0>=.6?"#FFF3E0":"#FFEBEE";
+    return(
+      <div>
+        <div style={S.card}>
+          <div style={S.calHdr}>
+            <button style={S.calNav} onClick={prevMonth}>‹</button>
+            <span style={S.calMonth}>{monthName}</span>
+            <button style={S.calNav} onClick={nextMonth}>›</button>
+          </div>
+          <div style={S.calGrid}>
+            {DOWS.map(d=><div key={d} style={S.calDow}>{d}</div>)}
+            {Array(firstDow>4?0:firstDow).fill(null).map((_,i)=><div key={"e"+i}/>)}
+            {Array.from({length:daysInMonth},(_,i)=>i+1).filter(d=>{
+              const dow=(new Date(calYear,calMonth,d).getDay()+6)%7;
+              return dow<=4;
+            }).map(d=>{
+              const ds=dateStr(calYear,calMonth,d);
+              const dayAus=getAus(ds);const absent=new Set(dayAus.map(a=>a.worker));
+              const nWork=WORKERS.length-absent.size;const r=nWork/WORKERS.length;
+              const isToday=ds===todayStr;const isSel=ds===selectedDay;
+              const dayBg=isSel?(r===1?"#E8F5E9":r>=.6?"#FFF8E1":"#FFEBEE"):(r===1?"#F9FFF9":r>=.6?"#FFFDF5":"#FFF5F5");
+              const dayBorder=isToday?"#1A237E":isSel?(r===1?"#43A047":r>=.6?"#FB8C00":"#E53935"):"#E8EAED";
+              const sCol=r===1?"#43A047":r>=.6?"#FB8C00":"#E53935";
+              return(
+                <div key={d} style={{borderRadius:8,padding:"3px 2px 3px",minHeight:62,cursor:"pointer",border:`1.5px solid ${dayBorder}`,background:dayBg,display:"flex",flexDirection:"column",alignItems:"center",gap:2}} onClick={()=>setSelectedDay(isSel?null:ds)}>
+                  <div style={{fontSize:13,fontWeight:isToday?900:700,color:isToday?"#fff":"#37474F",background:isToday?"#1A237E":"transparent",width:21,height:21,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,lineHeight:1}}>{d}</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:1.5,width:"100%",padding:"0 2px"}}>
+                    {WORKERS.map((w,i)=>{
+                      const col=WCOL[i];
+                      const aus=dayAus.find(a=>a.worker===w);
+                      const isAbs=absent.has(w);
+                      const isMe=w===currentUser;
+                      const isCompleta=isAbs&&aus&&aus.tipo==="Completa";
+                      const isParcial=isAbs&&aus&&aus.tipo==="Parcial";
+                      const motCol=aus?MCOL[aus.motivo].ac:col;
+                      return(
+                        <div key={w} style={{
+                          fontSize:10,
+                          fontWeight:isMe?800:700,
+                          lineHeight:"14px",
+                          borderRadius:3,
+                          textAlign:"center",
+                          padding:"0 1px",
+                          background: isCompleta?"#E8E8E8":isParcial?motCol+"18":col+"20",
+                          color: isCompleta?"transparent":isParcial?motCol:col,
+                          border: `1px solid ${isCompleta?"#D5D5D5":isParcial?motCol+"60":col+"50"}`,
+                          textDecoration: isCompleta?"none":"none",
+                          opacity: isCompleta?0.45:isParcial?0.7:1,
+                          outline: isMe?`1.5px solid ${isAbs?(isParcial?motCol:col):col}`:"none",
+                          outlineOffset:"1px",
+                        }}>{isCompleta?" ":w}</div>
+                      );
+                    })}
+                  </div>
+                  <div style={{fontSize:14,fontWeight:800,color:"#546E7A",marginTop:2,flexShrink:0}}>{nWork}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        {selectedDay&&(
+          <div style={S.dpanel}>
+            <div style={S.dpanelDate}>{fmtDate(selectedDay)}</div>
+            <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap"}}>
+              <span style={{...S.dsumPill,background:pillBg,color:pillCol}}>{selNWork} de {WORKERS.length} trabajando</span>
+              {!selAbsent.has(currentUser)?<span style={{...S.dsumPill,background:"#E8F5E9",color:"#2E7D32"}}>✓ Puedes pedir este día</span>:<span style={{...S.dsumPill,background:"#FFF3E0",color:"#E65100"}}>Ya tienes ausencia</span>}
+            </div>
+            {WORKERS.map((w,i)=>{
+              const aus=selAus.find(a=>a.worker===w);const col=WCOL[i];const isMe=w===currentUser;
+              return(
+                <div key={w} style={{...S.drow,borderBottom:i<WORKERS.length-1?"0.5px solid #ECEFF1":"none",background:isMe?col+"08":"transparent",borderRadius:8,paddingLeft:isMe?6:0}}>
+                  <div style={{...S.dav,background:col,boxShadow:isMe?`0 0 0 2px ${col}`:"none"}}>{w[0]}</div>
+                  <span style={{...S.dname,fontWeight:isMe?800:700}}>{w}{isMe&&" (tú)"}</span>
+                  {aus?<div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}><span style={{...S.dtag,background:MCOL[aus.motivo].bg,color:MCOL[aus.motivo].tx}}>{MICON[aus.motivo]} {aus.motivo}</span>{aus.isRange&&<span style={{fontSize:9,color:"#90A4AE",fontWeight:700}}>{aus.label}</span>}</div>:<span style={S.dwork}>✓ Trabaja</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── RESUMEN ───────────────────────────────────────────────────────────────
+  const Resumen=()=>{
+    const filtered=ausencias.filter(a=>filter==="Todos"||a.worker===filter).sort((a,b)=>b.dateFrom.localeCompare(a.dateFrom));
+    const myAus=ausencias.filter(a=>a.worker===currentUser);
+    const myDays=myAus.reduce((s,a)=>s+a.days.length,0);
+    return(
+      <div>
+        <div style={{...S.myCard,borderColor:WCOL[ci]+"80"}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{...S.wav,background:WCOL[ci],width:36,height:36,fontSize:15}}>{currentUser[0]}</div>
+            <div>
+              <div style={{fontWeight:800,fontSize:14,color:"#212121"}}>Mis ausencias</div>
+              <div style={{fontSize:12,color:"#78909C"}}>{myAus.length} registro{myAus.length!==1?"s":""} · {myDays} día{myDays!==1?"s":""} en total</div>
+            </div>
+          </div>
+          {myAus.length>0&&<div style={{marginTop:10,display:"flex",gap:6,flexWrap:"wrap"}}>{MOTIVOS.map(m=>{const n=myAus.filter(a=>a.motivo===m).reduce((s,a)=>s+a.days.length,0);if(!n)return null;const c=MCOL[m];return <span key={m} style={{...S.tag,background:c.bg,color:c.tx}}>{MICON[m]} {m}: {n}d</span>;})}</div>}
+        </div>
+        <div style={S.frow}>
+          <span style={S.flbl}>Ver:</span>
+          <select style={S.fsel} value={filter} onChange={e=>setFilter(e.target.value)}>
+            <option>Todos</option>
+            {WORKERS.map(w=><option key={w}>{w}</option>)}
+          </select>
+        </div>
+        {filtered.length===0
+          ?<div style={S.empty}><span style={{fontSize:40}}>📭</span><p>Sin ausencias registradas</p></div>
+          :filtered.map(a=>{const c=MCOL[a.motivo];const isMe=a.worker===currentUser;return(
+            <div key={a.id} style={{...S.item,borderLeftColor:c.ac}}>
+              <div style={S.ihdr}>
+                <div style={{...S.iav,background:wcolor(a.worker)}}>{a.worker[0]}</div>
+                <div style={S.imeta}><span style={S.iw}>{a.worker}{isMe&&" (tú)"}</span><span style={S.id2}>{a.isRange?`${fmtShort(a.dateFrom)} – ${fmtShort(a.dateTo)} (${a.days.length} días)`:fmtDate(a.dateFrom)}</span></div>
+                {isMe&&<button style={S.delbtn} onClick={()=>setConfirmDel(a.id)}>✕</button>}
+              </div>
+              <div style={S.tags}>
+                <span style={{...S.tag,background:c.bg,color:c.tx}}>{MICON[a.motivo]} {a.motivo}</span>
+                <span style={S.tgray}>{a.tipo==="Completa"?"●":"◑"} {a.tipo}</span>
+                {a.isRange&&<span style={{...S.tgray,background:"#EDE7F6",color:"#4527A0"}}>📆 {a.days.length} días</span>}
+              </div>
+            </div>
+          );})}
+        {ausencias.length>0&&<div style={S.stats}><p style={S.stitle}>Días de ausencia por persona</p><div style={S.sgrid}>{WORKERS.map((w,i)=>{const total=ausencias.filter(a=>a.worker===w).reduce((s,a)=>s+a.days.length,0);const isMe=w===currentUser;return(<div key={w} style={{...S.sc,background:isMe?WCOL[i]+"12":"transparent",borderRadius:8,padding:"6px 2px"}}><span style={{...S.sn,color:WCOL[i]}}>{total}</span><span style={{...S.snm,fontWeight:isMe?800:700}}>{w}{isMe&&" ✓"}</span></div>);})}</div></div>}
+      </div>
+    );
+  };
+
+  // ── RENDER ────────────────────────────────────────────────────────────────
+  return(
+    <div style={S.root}>
+      <header style={S.hdr}>
+        <div style={S.headerTop}>
+          <span style={S.logoT}>📅 Control de Ausencias</span>
+          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+            <button style={S.notifBtn} onClick={async()=>{setNotifOpen(true);if(unread>0)await markRead();}}>
+              🔔{unread>0&&<span style={S.badge}>{unread>9?"9+":unread}</span>}
+            </button>
+            <button style={{...S.userChip,borderColor:WCOL[ci]+"80",color:WCOL[ci]}} onClick={logout}>
+              <span style={{...S.userDot,background:WCOL[ci]}}>{currentUser[0]}</span>
+              {currentUser}<span style={{fontSize:10,opacity:.7,marginLeft:2}}>✕</span>
+            </button>
+          </div>
+        </div>
+        <div style={S.tabs}>
+          {[["registro","Registrar"],["calendario","Calendario"],["resumen","Ausencias"]].map(([v,label])=>(
+            <button key={v} style={{...S.tab,...(view===v?S.tabOn:{})}} onClick={()=>setView(v)}>{label}</button>
+          ))}
+        </div>
+      </header>
+      <main style={S.main}>
+        {view==="registro"&&<Registro/>}
+        {view==="calendario"&&<Calendario/>}
+        {view==="resumen"&&<Resumen/>}
+      </main>
+      {notifOpen&&<NotifPanel/>}
+      {toast&&<div style={{...S.toast,background:toast.col}}>{toast.msg}</div>}
+      {confirmDel&&(
+        <div style={S.overlay}>
+          <div style={S.dlg}>
+            <p style={S.dlgt}>¿Eliminar esta ausencia?</p>
+            <div style={S.dlgb}>
+              <button style={S.dlgc} onClick={()=>setConfirmDel(null)}>Cancelar</button>
+              <button style={S.dlgx} onClick={()=>doDelete(confirmDel)}>Eliminar</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const S={
+  root:{minHeight:"100vh",background:"#F0F4F8",fontFamily:"'Nunito',sans-serif",maxWidth:480,margin:"0 auto"},
+  loginWrap:{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:20},
+  loginCard:{background:"#fff",borderRadius:24,padding:32,width:"100%",maxWidth:380,boxShadow:"0 8px 40px rgba(0,0,0,.12)",textAlign:"center"},
+  loginTitle:{fontWeight:800,fontSize:29,color:"#1A237E",marginBottom:6},
+  loginSub:{color:"#78909C",fontWeight:600,fontSize:20,marginBottom:24},
+  loginGrid:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10},
+  loginBtn:{background:"#fff",border:"2px solid",borderRadius:16,padding:"12px 4px",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:6},
+  loginAvatar:{width:44,height:44,borderRadius:"50%",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:800},
+  loginName:{fontSize:17,fontWeight:800},
+  hdr:{background:"#1A237E",padding:"12px 16px 0",position:"sticky",top:0,zIndex:10},
+  headerTop:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10},
+  logoT:{color:"#fff",fontWeight:800,fontSize:21},
+  notifBtn:{position:"relative",background:"rgba(255,255,255,.15)",border:"none",borderRadius:20,width:36,height:36,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0},
+  badge:{position:"absolute",top:-4,right:-4,background:"#FF5722",color:"#fff",borderRadius:10,fontSize:10,fontWeight:800,minWidth:18,height:18,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 4px",border:"2px solid #1A237E"},
+  userChip:{display:"flex",alignItems:"center",gap:5,background:"rgba(255,255,255,.15)",border:"1.5px solid",borderRadius:20,padding:"4px 10px 4px 5px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:12,color:"#fff"},
+  userDot:{width:22,height:22,borderRadius:"50%",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800},
+  tabs:{display:"flex",gap:4},
+  tab:{flex:1,padding:"9px 0",border:"none",borderRadius:"8px 8px 0 0",background:"rgba(255,255,255,.13)",color:"rgba(255,255,255,.7)",fontFamily:"inherit",fontWeight:700,fontSize:16,cursor:"pointer"},
+  tabOn:{background:"#fff",color:"#1A237E"},
+  main:{padding:14,paddingBottom:32},
+  notifBackdrop:{position:"fixed",inset:0,background:"rgba(0,0,0,.45)",zIndex:50,display:"flex",alignItems:"flex-start",justifyContent:"center",paddingTop:60},
+  notifPanel:{background:"#fff",borderRadius:20,width:"92%",maxWidth:420,maxHeight:"80vh",display:"flex",flexDirection:"column",boxShadow:"0 16px 60px rgba(0,0,0,.25)",overflow:"hidden"},
+  notifHdr:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"14px 16px",borderBottom:"0.5px solid #ECEFF1"},
+  notifTitle:{fontWeight:800,fontSize:20,color:"#1A237E"},
+  notifClose:{background:"none",border:"none",fontSize:16,color:"#90A4AE",cursor:"pointer",padding:"2px 6px"},
+  notifEmpty:{display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"36px 0",color:"#90A4AE",fontWeight:600,fontSize:14},
+  notifFooter:{padding:"12px 14px",borderTop:"0.5px solid #ECEFF1"},
+  evSection:{fontSize:11,fontWeight:700,color:"#78909C",textTransform:"uppercase",letterSpacing:".5px",padding:"10px 16px 6px"},
+  evRow:{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 16px"},
+  evMsg:{fontSize:18,fontWeight:600,color:"#212121",lineHeight:1.4,margin:0},
+  evTime:{fontSize:16,color:"#90A4AE",marginTop:3,fontWeight:600},
+  newDot:{position:"absolute",top:0,right:0,width:9,height:9,background:"#FF5722",borderRadius:"50%",border:"2px solid #fff"},
+  card:{background:"#fff",borderRadius:16,padding:16,boxShadow:"0 2px 12px rgba(0,0,0,.07)"},
+  ctitle:{fontSize:24,fontWeight:800,color:"#1A237E",marginBottom:14},
+  lbl:{display:"block",fontWeight:700,fontSize:16,color:"#546E7A",marginBottom:7,textTransform:"uppercase",letterSpacing:".5px"},
+  myUserBadge:{display:"flex",alignItems:"center",gap:8,borderRadius:12,padding:"9px 12px",border:"1.5px solid",marginBottom:16},
+  myCard:{background:"#fff",borderRadius:16,padding:14,border:"2px solid",marginBottom:12,boxShadow:"0 1px 8px rgba(0,0,0,.06)"},
+  wav:{width:32,height:32,borderRadius:"50%",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800},
+  dateRow:{display:"flex",alignItems:"center",gap:8,marginBottom:8},
+  dateBlock:{flex:1,display:"flex",flexDirection:"column",gap:4},
+  dateSublbl:{fontSize:10,fontWeight:700,color:"#90A4AE",textTransform:"uppercase",letterSpacing:".5px"},
+  dateSep:{fontSize:18,color:"#B0BEC5",fontWeight:700,paddingTop:14,flexShrink:0},
+  dtin:{width:"100%",padding:"9px 8px",border:"1.5px solid #CFD8DC",borderRadius:10,fontSize:12,fontFamily:"inherit",color:"#212121",outline:"none",background:"#fff"},
+  rangeBadge:{background:"#EDE7F6",color:"#4527A0",borderRadius:10,padding:"7px 12px",fontSize:12,fontWeight:700,marginBottom:14,textAlign:"center"},
+  trow:{display:"flex",gap:8,marginBottom:16},
+  tbtn:{flex:1,padding:"10px 0",border:"2px solid #CFD8DC",borderRadius:10,background:"#F5F5F5",fontFamily:"inherit",fontWeight:700,fontSize:18,color:"#555",cursor:"pointer"},
+  tbtnOn:{background:"#1A237E",borderColor:"#1A237E",color:"#fff",fontSize:15},
+  mgrid:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:20},
+  mbtn:{padding:"11px 4px",border:"2px solid transparent",borderRadius:12,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2,fontFamily:"inherit"},
+  sbtn:{width:"100%",padding:"14px 0",color:"#fff",border:"none",borderRadius:12,fontFamily:"inherit",fontWeight:800,fontSize:20,cursor:"pointer"},
+  calHdr:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6},
+  calNav:{background:"none",border:"1.5px solid #CFD8DC",color:"#212121",width:32,height:32,borderRadius:8,cursor:"pointer",fontSize:20,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"inherit"},
+  calMonth:{fontWeight:800,fontSize:22,color:"#1A237E",textTransform:"capitalize"},
+  calGrid:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:2},
+  calDow:{textAlign:"center",fontSize:15,fontWeight:800,color:"#546E7A",padding:"3px 0",textTransform:"uppercase"},
+  calDay:{borderRadius:8,padding:"4px 2px 5px",minHeight:88,cursor:"pointer",border:"1.5px solid transparent",background:"#F5F7FA"},
+  calDayToday:{borderColor:"#1A237E"},
+  calDaySel:{borderColor:"#3F51B5",background:"#E8EAF6"},
+  calDn:{fontSize:11,fontWeight:800,textAlign:"center",color:"#37474F",marginBottom:4},
+  calChips:{display:"flex",flexDirection:"column",gap:2,padding:"0 2px"},
+  calChip:{borderRadius:4,fontSize:8,fontWeight:800,padding:"1px 3px",textAlign:"center",lineHeight:1.5},
+  calSummary:{fontSize:9,fontWeight:800,textAlign:"center",marginTop:3},
+  dpanel:{background:"#fff",borderRadius:16,padding:14,marginTop:10,boxShadow:"0 2px 12px rgba(0,0,0,.07)"},
+  dpanelDate:{fontWeight:800,fontSize:17,color:"#1A237E",marginBottom:10,textTransform:"capitalize"},
+  dsumPill:{padding:"6px 13px",borderRadius:20,fontSize:17,fontWeight:800,display:"inline-block"},
+  drow:{display:"flex",alignItems:"center",gap:8,padding:"7px 4px"},
+  dav:{width:30,height:30,borderRadius:"50%",color:"#fff",fontSize:13,fontWeight:800,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0},
+  dname:{flex:1,fontSize:19,fontWeight:700,color:"#212121"},
+  dtag:{padding:"3px 9px",borderRadius:20,fontSize:16,fontWeight:700},
+  dwork:{fontSize:16,fontWeight:700,color:"#2E7D32",padding:"3px 9px",background:"#E8F5E9",borderRadius:20},
+  frow:{display:"flex",alignItems:"center",gap:8,marginBottom:12},
+  flbl:{fontWeight:700,color:"#546E7A",fontSize:11,textTransform:"uppercase",letterSpacing:".5px"},
+  fsel:{flex:1,padding:"9px 11px",border:"1.5px solid #CFD8DC",borderRadius:10,fontFamily:"inherit",fontWeight:700,fontSize:13,color:"#212121",background:"#fff",outline:"none"},
+  empty:{display:"flex",flexDirection:"column",alignItems:"center",gap:10,padding:"36px 0",color:"#90A4AE",fontWeight:600,fontSize:14},
+  item:{background:"#fff",borderRadius:12,padding:"12px 12px 10px",boxShadow:"0 1px 8px rgba(0,0,0,.06)",borderLeft:"4px solid",marginBottom:8},
+  ihdr:{display:"flex",alignItems:"center",gap:9,marginBottom:8},
+  iav:{width:34,height:34,borderRadius:"50%",color:"#fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,flexShrink:0},
+  imeta:{flex:1,display:"flex",flexDirection:"column"},
+  iw:{fontWeight:800,fontSize:19,color:"#212121"},
+  id2:{fontSize:16,color:"#78909C",marginTop:1},
+  delbtn:{background:"none",border:"none",color:"#BDBDBD",fontSize:14,cursor:"pointer",padding:"3px 5px"},
+  tags:{display:"flex",gap:6,flexWrap:"wrap"},
+  tag:{padding:"4px 10px",borderRadius:20,fontSize:16,fontWeight:700},
+  tgray:{padding:"4px 10px",borderRadius:20,fontSize:16,fontWeight:700,background:"#F5F5F5",color:"#546E7A"},
+  stats:{background:"#fff",borderRadius:12,padding:14,marginTop:4,boxShadow:"0 1px 8px rgba(0,0,0,.06)"},
+  stitle:{fontWeight:800,color:"#1A237E",marginBottom:10,fontSize:17,textTransform:"uppercase",letterSpacing:".5px"},
+  sgrid:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6},
+  sc:{display:"flex",flexDirection:"column",alignItems:"center",gap:2},
+  sn:{fontSize:27,fontWeight:800},
+  snm:{fontSize:15,fontWeight:700,color:"#78909C"},
+  toast:{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",color:"#fff",padding:"10px 20px",borderRadius:30,fontWeight:700,fontSize:13,zIndex:100,whiteSpace:"nowrap",pointerEvents:"none"},
+  overlay:{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200},
+  dlg:{background:"#fff",borderRadius:16,padding:22,width:260,textAlign:"center",boxShadow:"0 8px 40px rgba(0,0,0,.2)"},
+  dlgt:{fontWeight:700,fontSize:15,color:"#212121",marginBottom:16},
+  dlgb:{display:"flex",gap:8},
+  dlgc:{flex:1,padding:"11px 0",border:"1.5px solid #CFD8DC",borderRadius:10,background:"#fff",fontFamily:"inherit",fontWeight:700,cursor:"pointer",color:"#546E7A",fontSize:13},
+  dlgx:{flex:1,padding:"11px 0",border:"none",borderRadius:10,background:"#C62828",color:"#fff",fontFamily:"inherit",fontWeight:700,cursor:"pointer",fontSize:13},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
