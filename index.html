@@ -200,22 +200,37 @@ function App() {
     await setupOneSignal(name);
   }
 
-  async function requestNotifPermission() {
-    try {
-      await new Promise(res => {
-        if(window._oneSignalReady) return res();
-        const check = setInterval(()=>{ if(window._oneSignalReady){ clearInterval(check); res(); } },200);
-        setTimeout(()=>{ clearInterval(check); res(); },5000);
-      });
-      const granted = await OneSignal.Notifications.requestPermission();
-      if(granted){
-        showToast("✅ Notificaciones activadas");
-        setNotifPrompt(false);
-        localStorage.setItem(`notif-ok-${currentUser}`,"1");
+  function requestNotifPermission() {
+    // Llamada directa sin await intermedios para preservar el gesto del usuario
+    Notification.requestPermission().then(async (permission) => {
+      if(permission === "granted"){
+        try {
+          // Registrar en OneSignal tras obtener el permiso nativo
+          if(window._oneSignalReady){
+            await OneSignal.login(currentUser);
+            const reg = await navigator.serviceWorker.ready;
+            const token = await OneSignal.User.PushSubscription.token;
+            if(!token){
+              // Forzar suscripción
+              await OneSignal.User.PushSubscription.optIn();
+            }
+          }
+          showToast("✅ Notificaciones activadas");
+          setNotifPrompt(false);
+          localStorage.setItem(`notif-ok-${currentUser}`,"1");
+        } catch(e){ 
+          showToast("✅ Notificaciones activadas");
+          setNotifPrompt(false);
+          localStorage.setItem(`notif-ok-${currentUser}`,"1");
+        }
       } else {
-        showToast("⚠️ Permiso denegado. Actívalas desde ajustes del navegador","#E65100");
+        showToast("⚠️ Permiso denegado. Actívalas en los ajustes del navegador","#E65100");
+        setNotifPrompt(false);
+        localStorage.setItem(`notif-ok-${currentUser}`,"skip");
       }
-    } catch(e){ showToast("❌ Error al activar notificaciones","#C62828"); }
+    }).catch(()=>{
+      showToast("❌ Error al solicitar permiso","#C62828");
+    });
   }
 
   function logout() {
