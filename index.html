@@ -95,14 +95,15 @@ async function sendPushToOthers(msg, excludeUser) {
 const { useState, useEffect, useRef } = React;
 
 const WORKERS = ["Ana","Eva","Fabiola","Aroa","Javi"];
-const MOTIVOS = ["Vacaciones","Asuntos propios","Médico","Baja"];
+const MOTIVOS = ["Vacaciones","Asuntos propios","Médico","Baja","Permiso"];
 const TIPOS   = ["Completa","Parcial"];
-const MICON   = { Vacaciones:"🏖️", "Asuntos propios":"📋", Médico:"🩺", Baja:"🤒" };
+const MICON   = { Vacaciones:"🏖️", "Asuntos propios":"📋", Médico:"🩺", Baja:"🤒", Permiso:"📝" };
 const MCOL    = {
   Vacaciones:        { bg:"#FFF3E0", ac:"#F57C00", tx:"#BF360C" },
   "Asuntos propios": { bg:"#E8F5E9", ac:"#388E3C", tx:"#1B5E20" },
   Médico:            { bg:"#E3F2FD", ac:"#1976D2", tx:"#0D47A1" },
   Baja:              { bg:"#FCE4EC", ac:"#C62828", tx:"#7B1521" },
+  Permiso:           { bg:"#F3E5F5", ac:"#7B1FA2", tx:"#4A148C" },
 };
 const WCOL = ["#3F51B5","#D81B60","#00897B","#F4511E","#6A1B9A"];
 const DOWS = ["L","M","X","J","V"];
@@ -200,37 +201,21 @@ function App() {
     await setupOneSignal(name);
   }
 
-  function requestNotifPermission() {
-    // Llamada directa sin await intermedios para preservar el gesto del usuario
-    Notification.requestPermission().then(async (permission) => {
-      if(permission === "granted"){
-        try {
-          // Registrar en OneSignal tras obtener el permiso nativo
-          if(window._oneSignalReady){
-            await OneSignal.login(currentUser);
-            const reg = await navigator.serviceWorker.ready;
-            const token = await OneSignal.User.PushSubscription.token;
-            if(!token){
-              // Forzar suscripción
-              await OneSignal.User.PushSubscription.optIn();
-            }
-          }
-          showToast("✅ Notificaciones activadas");
-          setNotifPrompt(false);
-          localStorage.setItem(`notif-ok-${currentUser}`,"1");
-        } catch(e){ 
-          showToast("✅ Notificaciones activadas");
-          setNotifPrompt(false);
-          localStorage.setItem(`notif-ok-${currentUser}`,"1");
-        }
-      } else {
-        showToast("⚠️ Permiso denegado. Actívalas en los ajustes del navegador","#E65100");
-        setNotifPrompt(false);
-        localStorage.setItem(`notif-ok-${currentUser}`,"skip");
-      }
-    }).catch(()=>{
-      showToast("❌ Error al solicitar permiso","#C62828");
-    });
+  async function requestNotifPermission() {
+    try {
+      if(!window._oneSignalReady){ showToast("⚠️ Espera un momento e inténtalo de nuevo","#E65100"); return; }
+      // 1. Asignar identidad en OneSignal
+      await OneSignal.login(currentUser);
+      // 2. Opt-in: pide permiso al navegador Y registra en OneSignal en un solo paso
+      await OneSignal.User.PushSubscription.optIn();
+      // 3. Confirmar
+      showToast("✅ Notificaciones activadas");
+      setNotifPrompt(false);
+      localStorage.setItem(`notif-ok-${currentUser}`,"1");
+    } catch(e) {
+      console.error("Notif error:", e);
+      showToast("⚠️ No se pudo activar. Comprueba los permisos del navegador","#E65100");
+    }
   }
 
   function logout() {
@@ -619,7 +604,7 @@ const S={
   trow:{display:"flex",gap:8,marginBottom:16},
   tbtn:{flex:1,padding:"10px 0",border:"2px solid #CFD8DC",borderRadius:10,background:"#F5F5F5",fontFamily:"inherit",fontWeight:700,fontSize:18,color:"#555",cursor:"pointer"},
   tbtnOn:{background:"#1A237E",borderColor:"#1A237E",color:"#fff",fontSize:15},
-  mgrid:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:20},
+  mgrid:{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:7,marginBottom:20},
   mbtn:{padding:"11px 4px",border:"2px solid transparent",borderRadius:12,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2,fontFamily:"inherit"},
   sbtn:{width:"100%",padding:"14px 0",color:"#fff",border:"none",borderRadius:12,fontFamily:"inherit",fontWeight:800,fontSize:20,cursor:"pointer"},
   calHdr:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6},
